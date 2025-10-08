@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="code"/></w:pPr><w:r><w:t><![CDATA[% gen_ecg.m
+% Generate synthetic ECG (sum-of-Gaussians model)
+% Outputs: ecg (mV) and time vector t (s)
+clear; close all; clc;
+
+%% Parameters
+fs = 500;                % sampling frequency (Hz)
+Ts = 1/fs;
+dur = 10;                % duration (s)
+t = (0:Ts:dur-Ts)';      % time vector
+
+% Heart rate / beat timing
+HR_mean = 60;            % bpm
+Tbeat_mean = 60 / HR_mean; % mean beat period (s)
+
+% Option: heart-rate variability (std of RR in seconds)
+enable_hrv = true;
+rr_std = 0.03;           % 30 ms std dev of RR intervals (physiologic-ish)
+
+% Wave amplitudes (mV)
+A = struct('P',0.25,'Q',-0.15,'R',1.0,'S',-0.25,'T',0.35);
+
+% Relative times inside beat (s)
+t_rel = struct('P',0.16,'Q',0.28,'R',0.30,'S',0.32,'T',0.45);
+
+% Widths (sigma) in seconds
+sigma = struct('P',0.025,'Q',0.010,'R',0.012,'S',0.010,'T',0.040);
+
+% Noise & baseline
+enable_baseline = true;
+baseline_amp = 0.05;     % mV
+baseline_freq = 0.33;    % Hz (respiratory)
+
+enable_noise = true;
+noise_std = 0.01;        % mV (adjust for SNR)
+
+%% Create beat start times with optional HRV
+% Generate RR intervals
+n_beats_est = ceil(dur / Tbeat_mean) + 5;
+if enable_hrv
+    rr_intervals = Tbeat_mean + rr_std.*randn(n_beats_est,1);
+    rr_intervals(rr_intervals < 0.5*Tbeat_mean) = 0.5*Tbeat_mean; % clamp
+else
+    rr_intervals = repmat(Tbeat_mean, n_beats_est, 1);
+end
+beat_starts = cumsum([0; rr_intervals(:)]);
+beat_starts = beat_starts( beat_starts < dur ); % only keep beats inside duration
+n_beats = numel(beat_starts);
+
+%% Preallocate ECG
+ecg = zeros(size(t));
+
+%% Sum Gaussian waves for each beat and each wave type
+fields = {'P','Q','R','S','T'};
+for fidx = 1:numel(fields)
+    name = fields{fidx};
+    Ai = A.(name);
+    ti = t_rel.(name);
+    si = sigma.(name);
+    % Create matrix of centers: beat_starts + ti
+    centers = beat_starts + ti;               % 1 x n_beats
+    % Compute contribution: sum_k Ai * exp(-((t - centers(k)).^2)/(2*si^2))
+    % Vectorize: use bsxfun-like broadcasting
+    TT = t;                                   % Nt x 1
+    C = centers(:)';                          % 1 x Nb
+    X = TT - C;                               % Nt x Nb
+    G = exp( - (X.^2) / (2*si^2) );           % Nt x Nb
+    % Sum across beats and scale by amplitude
+    ecg = ecg + Ai * sum(G, 2);
+end
+
+%% Add baseline wander (sinusoidal)
+if enable_baseline
+    baseline = baseline_amp * sin(2*pi*baseline_freq*t);
+    ecg = ecg + baseline;
+else
+    baseline = zeros(size(t));
+end
+
+%% Add band-limited noise (approx using filtered white noise)
+if enable_noise
+    rng(0); % reproducible noise
+    white = noise_std * randn(size(t));
+    % Simple lowpass filter to simulate muscle noise: moving average (FIR)
+    Nfir = round(fs*0.01); % 10 ms smoothing
+    if mod(Nfir,2)==0, Nfir = Nfir+1; end
+    h = ones(Nfir,1)/Nfir;
+    noise = conv(white,h,'same');
+    ecg = ecg + noise;
+else
+    noise = zeros(size(t));
+end
+
+%% Output scaling: currently in mV.
+% Option: convert to microvolts (uV) if needed: ecg_uV = ecg*1000;
+
+%% Save results
+save('ecg_sim.mat','t','ecg','baseline','noise','beat_starts','A','t_rel','sigma');
+
+%% Plots
+figure('Name','Synthetic ECG'); 
+subplot(3,1,1);
+plot(t, ecg, 'k'); xlim([0 4]); xlabel('Time (s)'); ylabel('mV'); title('Synthetic ECG (0--4 s)');
+grid on;
+
+subplot(3,1,2);
+% zoom near a beat to inspect morphology
+tzoom = 0.28; idx = find(t>=tzoom & t < tzoom+0.6);
+plot(t(idx), ecg(idx), 'b'); xlabel('Time (s)'); ylabel('mV'); title('Single beat morphology (zoom)');
+grid on;
+
+subplot(3,1,3);
+% Power spectral density (Welch)
+window = round(1*fs); overlap = round(0.5*window);
+[Pxx,freqs] = pwelch(ecg, window, overlap, [], fs);
+plot(freqs, 10*log10(Pxx)); xlim([0 50]); xlabel('Hz'); ylabel('dB/Hz'); title('PSD (0-50 Hz)');
+grid on;
+
+%% Quick diagnostics printed
+fprintf('Generated %d beats in %.2f s (mean RR=%.3f s)\n', n_beats, dur, mean(diff([0;beat_starts(:)])) );
+]]></w:t></w:r></w:p></w:body></w:document>
